@@ -31,7 +31,8 @@ THE SOFTWARE.
 
 #define	DEBUG_ESSENTIAL	0					// Debug error levels (set by command line)
 #define	DEBUG_TRACE	1
-#define	DEBUG_DETAIL	2
+#define	DEBUG_INFO 	2
+#define	DEBUG_DETAIL	3
 
 extern int debuglev;
 void die(char *format, ...);

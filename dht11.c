@@ -45,16 +45,12 @@ typedef struct {
 
 static volatile pin Button_pin;			// Button related pin details
 
-//
-//	DHT11 device variables
-//
-
 #define MAX_PULSE_RESPONSES	3		// DHT11 response pulses - transitions to be measured
 #define MAX_PULSE_DATA		40		// DHT11 data pulses
-#define MAX_PULSE_TIMINGS	84		// Maximum number of pulse transitions Response Pulses (2*2) + Data (2*40)
-#define MAX_PULSE_WIDTH		99		// Maximum pulse width on data pulses
+#define MAX_PULSE_TIMINGS	(MAX_PULSE_RESPONSES+(2*MAX_PULSE_DATA)) // Maximum number of pulse transitions Response Pulses (2*2) + Data (2*40)
+#define MAX_PULSE_WIDTH		49		// Maximum pulse width on data pulses
 #define DHT_PIN			8		// DHT control pin (physical Pin number)
-#define DHT_PRIORITY		10		// DHT process priority
+#define DHT_PRIORITY		90		// DHT process priority
 
 
 static int last_pin_state;			// last known state of DHT11 pin
@@ -62,6 +58,14 @@ static uint8_t pulse_count;			// count of response pulses
 static  int timings[MAX_PULSE_TIMINGS]; 	// record of pulse duration
 
 static int dht11_data[5] = { 0, 0, 0, 0, 0 };
+
+static int read_count;
+static int success_count;
+static int crc_count;
+static int tot_read_count;
+static int tot_success_count;
+static int tot_crc_count;
+
 
 //
 //	Button Interrupot Handler
@@ -94,6 +98,7 @@ ENDERROR;
 void	dht_signal_read_request() {
     int	new_pin_state;					// Latest state of DHT11 pin
     uint8_t pulse_width;				// count of usec pulse width
+    read_count++;
 
 							// ADJUSTED to maximise performace
     last_pin_state = LOW;				// Assume we will miss first edge transition
@@ -103,8 +108,8 @@ void	dht_signal_read_request() {
     digitalWrite( DHT_PIN, LOW );
     delay( 18 );
     digitalWrite( DHT_PIN, HIGH );
-    delayMicroseconds( 30 );
     pinMode( DHT_PIN, INPUT );
+    delayMicroseconds( 20 );
 
     for (pulse_count = 0; pulse_count < MAX_PULSE_TIMINGS; pulse_count++) { // For all of pulses in the expected pulse train
 	pulse_width = 0;
@@ -122,47 +127,95 @@ void	dht_signal_read_request() {
 }
 
 //
-//	Interpret DHT response tinings & extract data
+//	display captured timings
 //
 
-int	dht_interpret_data() {
+
+void	display_timings() {
+    int i;
+    char string[(30+3*(MAX_PULSE_TIMINGS/2))];	// Risky string length - CAREFUL  if you change strings
+
+    debug(DEBUG_TRACE, "Pulse: %d\n", pulse_count);
+    sprintf(string, "Timings:   Low - ");
+    for ( i = 0; i < MAX_PULSE_TIMINGS; i+=2 ) { sprintf(string, "%s%2d:", string, timings[i]); }
+    sprintf(string, "%s\n", string);
+    debug(DEBUG_TRACE, string);
+
+    sprintf(string, "           High- ");
+    for ( i = 1; i < MAX_PULSE_TIMINGS; i+=2 ) { sprintf(string, "%s%2d:", string, timings[i]); }
+    sprintf(string, "%s\n", string);
+    debug(DEBUG_TRACE, string);
+    debug(DEBUG_TRACE, "           DHT data [%d]{%d][%d][%d][%d]\n", dht11_data[0], dht11_data[1], dht11_data[2], dht11_data[3], dht11_data[4]);
+}
+
+
+#define	DHT_INITIAL_THRESHOLD 14
+static int	dht_threshold = DHT_INITIAL_THRESHOLD;		// High/Low threshold
+static int	min_high = MAX_PULSE_WIDTH;
+static int	max_low = 0;
+//
+//	Parse Data
+//
+int	parse_data(int dht) {
     int data_count = 0;
     int	i;
+    int ret;
 
+    min_high = MAX_PULSE_WIDTH;
+    max_low = 0;
     for (i=0; i < 5; i++) dht11_data[i] = 0;	// initialise data
 
     for (i = MAX_PULSE_RESPONSES; i < pulse_count; i++) { // for each of the pulses (ignoring startup pulses)
 	if (i % 2 == 1) {			// place bit in appropriate data array
 	    dht11_data[data_count / 8] <<= 1;	// check pulse width for data 1 or 0
-	    if ( timings[i] > 16 ) { dht11_data[data_count / 8] |= 1; }
+	    if ( timings[i] > dht ) {
+		dht11_data[data_count / 8] |= 1;
+		min_high = (timings[i] < min_high ? timings[i] : min_high);
+	    } else {
+		max_low  = (timings[i] > max_low  ? timings[i] : max_low );
+	    }
 	    data_count++;
 	}
     }
+    ret = (dht11_data[4] == ((dht11_data[0] + dht11_data[1] + dht11_data[2] + dht11_data[3]) & 0xFF));
+    debug(DEBUG_TRACE, "DHT11 Result %d L/H [%2d:%2d:%2d]\n", ret, dht, max_low, min_high);
+    return(ret);
+}
+//
+//	Interpret DHT response tinings & extract data
+//
 
-    if (data_count < MAX_PULSE_DATA) goto ReadError;
-    if (dht11_data[4] != ((dht11_data[0] + dht11_data[1] + dht11_data[2] + dht11_data[3]) & 0xFF)) goto CRCError;
+int	dht_interpret_data() {
+    int good = 0;
+
+						// Throws out incomplete data
+    if (pulse_count <((2* MAX_PULSE_DATA)+MAX_PULSE_RESPONSES)) goto ReadError;
+
+    good = parse_data(dht_threshold);		// Parse good data
+    if (good) {					// If OK
+	dht_threshold = max_low + 3;		// set threshold
+
+    } else {					// otherwise
+	good = parse_data(max_low-1);		// Reparse using lower threshold
+    }
+    if (!good) goto CRCError;			// If still no good CRC error
 
 ERRORBLOCK(ReadError);
-    char	string[(20+3*MAX_PULSE_TIMINGS)];	// Risky string length - CAREFUL  if you change strings
+    debug(DEBUG_INFO, "DHT11 Incomplete Read data, count[%d/%d]\n", pulse_count, MAX_PULSE_TIMINGS);
 
-    debug(DEBUG_TRACE, "DHT11 Incomplete Read data\n");
-    sprintf(string, "Timings:   Low - ");
-    for ( i = 0; i < MAX_PULSE_TIMINGS; i+=2 ) { sprintf(string, "%s%2d:", string, timings[i]); }
-    sprintf(string, "%s\n", string);
-    debug(DEBUG_DETAIL, string);
-
-    sprintf(string, "           High- ");
-    for ( i = 1; i < MAX_PULSE_TIMINGS; i+=2 ) { sprintf(string, "%s%2d:", string, timings[i]); }
-    sprintf(string, "%s\n", string);
-    debug(DEBUG_DETAIL, string);
-
-    debug(DEBUG_DETAIL, "Pulse & Data: %d:%d\n", pulse_count, data_count);
-
+    DEBUG_FUNCTION( DEBUG_DETAIL, display_timings());
     return(0);
+
 ERRORBLOCK(CRCError);
     debug(DEBUG_TRACE, "DHT11 CRC error\n");
+    crc_count++;
+
+    DEBUG_FUNCTION( DEBUG_INFO, display_timings());
     return(0);
+
 ENDERROR;
+    DEBUG_FUNCTION( DEBUG_INFO, display_timings());
+    success_count++;
     return(1);
 }
 
@@ -171,16 +224,16 @@ ENDERROR;
 //
 
 #define		MAX_DHT_RETRYS	10		// Maximum nuber of reties to get a valid reading
+#define         DHT_SIGN	0x80		// DHT22 Sign bit
+#define         DHT_DATA	0x7F		// DHT22 Data bits
 
 void read_dht11() {
     int	i;
-    float	f;
+    int raw_temperature;
 						// initialise data handling variables
     for ( i = 0; i < MAX_PULSE_TIMINGS; i++ ) { timings[i] = 0; } // record of pulse durations
 
     piHiPri(DHT_PRIORITY);			// ensure thread is given highest priority
-    pinMode(BUTTON_WRITE_PIN, OUTPUT );
-    digitalWrite(BUTTON_WRITE_PIN, 1);
     dht_signal_read_request();			// Signal to DHT11 read request
     i= 0;
     while ((!dht_interpret_data()) && 		// Interpret the data, check for completeness and CRC
@@ -189,39 +242,94 @@ void read_dht11() {
 	delay(2000);				// allow DHT11 to stabalise
 	dht_signal_read_request();		// and retry Read request
     }
-    ERRORCHECK(i== MAX_DHT_RETRYS, "DHT11 Persistant Read Faulure", EndError);
-    f = dht11_data[2] * 9. / 5. + 32;
-    debug(DEBUG_ESSENTIAL, "Humidity = %d.%d %% Temperature = %d.%d C (%.1f F)\n", dht11_data[0], dht11_data[1], dht11_data[2], dht11_data[3], f );
+    ERRORCHECK(i== MAX_DHT_RETRYS, "DHT11 Persistant Read Failure", ReadError);  // Fail
 
+    //	Support for DHT11 or DHT22 devices
+    //	DHT11 - uses data[2].data[3]
+    //  DHT22 - uses data[2]*256 + data[3] /10, plus sign bit in data[2]
+    //
+
+    if ((dht11_data[2] & DHT_DATA) < 30) {	// Data looks valid (have encountered some problems with adaptive crc check)
+	if ((dht11_data[2] & DHT_DATA) < 4) {	// Device is most likely a DHT22
+	    raw_temperature = ((dht11_data[2] & DHT_DATA) << 8) + dht11_data[3];
+	    if(dht11_data[2] & DHT_SIGN) { raw_temperature  = -raw_temperature;}
+	    debug(DEBUG_INFO, "DHT Device DHT22 [%d.%d] => %d.%d\n", dht11_data[2], dht11_data[3], raw_temperature/10, abs(raw_temperature%10));
+
+	} else {				// Device is most liekly a DHT11
+	    raw_temperature = (dht11_data[2] * 10) + dht11_data[3];
+	    debug(DEBUG_INFO, "DHT Device DHT11 [%d.%d] => %d.%d\n", dht11_data[2], dht11_data[3], raw_temperature/10, abs(raw_temperature%10));
+	}
+//	app.temp = (float) raw_temperature / 10.0;
+
+    } else {					// Data is out of realistic range - don't chage reported temp
+	warn("DHT11 temperature out of range [%d.%d] - ignored", dht11_data[2], dht11_data[3]);
+    }
+
+ERRORBLOCK(ReadError);
+//    app.temp = -0.1;
 ENDERROR;
-    digitalWrite(BUTTON_WRITE_PIN, 0);
 }
 
+#define	DHT11_OVERALL	(61)			// DHT11 Cycle overall timer
+#define DHT11_READ	(3)			// DHT11 Read cycle
+#define DHT11_CYCLES	(5)			// Number of cycles in test
+
 //
-//	DHT11 Example test programe
+//	Initialise wiring Pi
 //
-
-int main( void )
-{
-    int rc;
-
-    printf( "Raspberry Pi wiringPi DHT11 Temperature test program\n" );
-
+void	initialise_GPIO() {
     if ( wiringPiSetupPhys() == -1 )
 	exit( 1 );
+}
+//
+//	Monitor Sensor Process
+//
 
+int	main(void)	{
+    int	rc = -1;
+    int cycles;
+    int cycle_time = DHT11_OVERALL;
+    float efficiency;
+
+
+    printf( "Raspberry Pi wiringPi DHT11 Temperature test program\n" );
+    initialise_GPIO();
     debuglev = DEBUG_TRACE;			// Always TRACE within test program
+
+    read_count = 0;				// Initialise read status
+    success_count = 0;
+    crc_count = 0;
+    tot_read_count = 0;				// Initialise read status
+    tot_success_count = 0;
+    tot_crc_count = 0;
 
     Button_pin.last_pin_state = HIGH;		// last known pin state
     Button_pin.edge1 = millis();		// record starting edge timestamp
     rc = wiringPiISR(BUTTON_READ_PIN, INT_EDGE_BOTH, &Button_interrupt);  // Interrupt on rise or fall of DHT Pin
     ERRORCHECK( rc < 0, "DHT Error - Pi ISR problem", EndError);
-    delay( 2000 );				// Allow time for DHT11 to settle
 
-    while ( 1 )	{
-	read_dht11();
-	delay( 10000 );
+    delay(2000);				// Allow time for DHT11 to settle
+    for(cycles = 0; cycles < DHT11_CYCLES; cycles++){
+    cycle_time = 1;
+
+    while ( cycle_time )	{
+	if ((cycle_time % DHT11_READ) == 0) {		// Every x seconds
+	    read_dht11();
+	}
+	delay(1000);
+	cycle_time =( cycle_time + 1) % DHT11_OVERALL;
     }
+    efficiency = ((float)success_count/ (float)read_count)* 100.0;
+    debug(DEBUG_ESSENTIAL, "DHT11 efficiency %2.0f%, read[%d], ok[%d], crc[%d] L/H[%d]\n", efficiency, read_count, success_count, crc_count, dht_threshold);
+    tot_read_count = tot_read_count + read_count;
+    tot_success_count = tot_success_count + success_count;
+    tot_crc_count = tot_crc_count + crc_count;
+    read_count = 0;
+    success_count = 0;
+    crc_count = 0;
+    }
+    efficiency = ((float)tot_success_count/ (float)tot_read_count)* 100.0;
+    debug(DEBUG_ESSENTIAL, "DHT11 Overall efficiency %2.0f%, read[%d], ok[%d], crc[%d] L/H[%d]\n", efficiency, tot_read_count, tot_success_count, tot_crc_count, dht_threshold);
 
 ENDERROR;
     return(0);
