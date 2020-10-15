@@ -6,9 +6,9 @@ DEFINES = $(PLATFORM_DEFINES)
 
 CFLAGS = $(CDEBUGFLAGS) $(DEFINES) $(EXTRA_DEFINES)
 
-SRCS = dht11.c errorcheck.c
+SRCS = dht11.c errorcheck.c config.c
 
-OBJS = dht11.o errorcheck.o
+OBJS = dht11.o errorcheck.o config.o
 
 LDLIBS = -lrt -lwiringPi
 
