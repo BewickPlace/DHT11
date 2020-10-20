@@ -25,7 +25,10 @@ THE SOFTWARE.
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <errno.h>
 
+
+#include <pthread.h>
 #include <wiringPi.h>
 #include "errorcheck.h"
 #include "config.h"
@@ -101,6 +104,9 @@ void	dht_signal_read_request() {
     int	new_pin_state;					// Latest state of DHT11 pin
     uint8_t pulse_width;				// count of usec pulse width
     read_count++;
+    int i;
+							// initialise data handling variables
+    for ( i = 0; i < MAX_PULSE_TIMINGS; i++ ) { timings[i] = 0; } // record of pulse durations
 
 							// ADJUSTED to maximise performace
     last_pin_state = LOW;				// Assume we will miss first edge transition
@@ -112,6 +118,7 @@ void	dht_signal_read_request() {
     digitalWrite( DHT_PIN, HIGH );
     pinMode( DHT_PIN, INPUT );
     delayMicroseconds( 20 );
+
 
     for (pulse_count = 0; pulse_count < MAX_PULSE_TIMINGS; pulse_count++) { // For all of pulses in the expected pulse train
 	pulse_width = 0;
@@ -135,7 +142,7 @@ void	dht_signal_read_request() {
 
 void	display_timings() {
     int i;
-    char string[(30+3*(MAX_PULSE_TIMINGS/2))];	// Risky string length - CAREFUL  if you change strings
+    char string[(30+(3*(MAX_PULSE_TIMINGS/2)))];// Risky string length - CAREFUL  if you change strings
     char reading[5];				// Reading: 2 digits + ":" + NULL + 1 spare
 
     debug(DEBUG_TRACE, "Pulse: %d\n", pulse_count);
@@ -210,7 +217,7 @@ int	parse_data(int dht) {
 	}
     }
     ret = (dht11_data[4] == ((dht11_data[0] + dht11_data[1] + dht11_data[2] + dht11_data[3]) & 0xFF));
-    debug(DEBUG_TRACE, "DHT11 Result %d L/H [%2d:%2d:%2d]\n", ret, dht, max_low, min_high);
+    debug(DEBUG_TRACE, "DHT11 Result %d T/L/H [%2d:%2d:%2d] Data:[%3d][%3d][%3d][%3d][%3d]\n", ret, dht, max_low, min_high, dht11_data[0], dht11_data[1], dht11_data[2], dht11_data[3], dht11_data[4]);
     return(ret);
 }
 //
@@ -270,10 +277,7 @@ ENDERROR;
 void read_dht11() {
     int	i;
     int raw_temperature;
-						// initialise data handling variables
-    for ( i = 0; i < MAX_PULSE_TIMINGS; i++ ) { timings[i] = 0; } // record of pulse durations
 
-    piHiPri(DHT_PRIORITY);			// ensure thread is given highest priority
     dht_signal_read_request();			// Signal to DHT11 read request
     i= 0;
     while ((!dht_interpret_data()) && 		// Interpret the data, check for completeness and CRC
@@ -331,7 +335,6 @@ int	main(void)	{
     int cycle_time = DHT11_OVERALL;
     float efficiency;
 
-
     printf( "Raspberry Pi wiringPi DHT11 Temperature test program\n" );
     initialise_GPIO();
     debuglev = DEBUG_TRACE;			// Always TRACE within test program
@@ -347,6 +350,8 @@ int	main(void)	{
     Button_pin.edge1 = millis();		// record starting edge timestamp
     rc = wiringPiISR(BUTTON_READ_PIN, INT_EDGE_BOTH, &Button_interrupt);  // Interrupt on rise or fall of DHT Pin
     ERRORCHECK( rc < 0, "DHT Error - Pi ISR problem", EndError);
+
+    if (piHiPri(DHT_PRIORITY) < 0) debug(DEBUG_ESSENTIAL, "Error setting priority: %d\n", errno);	// ensure thread is given highest priority
 
     set_dht_threshold();			// Set the threshold for DHT data values
     delay(2000);				// Allow time for DHT11 to settle
